@@ -76,7 +76,7 @@
     docker ps // 실행중인 프로세스 중에 redis가 있는지 확인
     ```
     
-    ![image.png](%5BRedis%5D%20%E1%84%8B%E1%85%B5%E1%84%92%E1%85%A2%2018581d8a13f08026aab8f20fb5501245/image.png)
+    ![image.png](./assets//dockerComposeUpRedis.png)
     
 5. redis-cli를 통한 연결 가능
     
@@ -190,7 +190,7 @@ Redis는 LRU (Least Recently Used) 알고리즘을 사용해 메모리를 관리
 
 # 데이터 영속화 (RDB, AOF)
 
-![image.png](%5BRedis%5D%20%E1%84%8B%E1%85%B5%E1%84%92%E1%85%A2%2018581d8a13f08026aab8f20fb5501245/image%201.png)
+![image.png](./assets/EX-RDB-AOF.png)
 
 Redis는 In-memoryDB임에도 불구하고 메모리 데이터를 disck에 저장할 수 있다
 
