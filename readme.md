@@ -4,10 +4,10 @@
 2. Redis를 사용하는 API 구축 [o]
 3. Keysapce와 Redis의 메모리 관리 방식 [o]
 4. 데이터 영속화(AOF, RDB) [o]
-5. Indexing과 Caching 활용 [] 
+5. Indexing과 Caching 활용 [o] 
     - Redis를 캐싱 계층으로 사용해 데이터베이스의 성능 향상
-6. TTL와 LRU 알고리즘 이해 []
-7. 기타 자료구조 활용 (Hsah, List, Set, Sorted Set) []
+6. TTL와 LRU 알고리즘 이해 [o]
+7. 기타 자료구조 활용 (Hsah, List, Set, Sorted Set) [o]
 8. 캐싱 정책 - 정적/동적 캐싱 차이 []
 9. Cahce Stampede 방지 - 잠금 캐싱 []
 10. Lock 구현 및 동시성 이슈 해결 []
@@ -595,6 +595,120 @@ appendfsync everysec
 - 주기적으로 RDB로 백업하고, snapshot까지의 저장을 AOF 방식으로 수행하는 식으로 혼용
 
 이렇게 하면 서버가 restart할 때 백업된 snapshot을 reload하고 비교적 적은 양의 AOF 로그만 replay하면 되기 때문에 restart 시간을 절약하고 데이터의 손실의 최소화 할 수 있다.
+
+# Indexing
+
+인덱싱이란 데이터를 보다 빠르게 검색할 수 있도록 정렬된 데이터 구조를 활용하는 기법이다
+
+## Redis에서 Indexing을 활용하는 방법
+
+Redis는 데이터구조가 단순한 key-value 저장소가 아니라, `List, Set, Sorted, Hash` 같은 다양한 자료구조를 제공
+이를 잘 활용하면 효율적인 `검색 인덱스`를 만들 수 있다.
+
+### Sorted Set을 활용한 검색 인덱스
+
+ZADD 명령어를 사용해 정렬된 데이터를 저장
+
+ZRANGE와 같은 명령어를 이용해 빠르게 검색 가능
+
+```jsx
+ZADD users:age 25 "user1"
+ZADD users:age 30 "user2"
+ZADD users:age 35 "user3"
+
+ZRANGE users:age 0 -1 WITHSCORES 
+// 결과 ["user1", 25, "user2", 30, "user3", 35]
+// 특정 범위의 데이터 검색이 빠르다
+```
+
+### Hash를 활용한 빠른 조회
+
+사용자 정보 같은 데이터를 key-value 형태로 저장
+
+```jsx
+// 구조체 형대로 저장이됨
+HSET user:1001 name "John Doe" age 30 email "john@mail.com
+
+// 특정 필드 검색 : key값 안에서 원하는 정보를 가져올 수 있다.
+HGET user:1001 name
+
+// 결과 : 관계형 DB보다 빠른 검색이 가능하다
+"John Doe" 
+```
+
+# TTL(Time-To-Live)이란
+
+데이터의 유효기간을 설정해주는 기능이다
+특정 시간이 지나면 데이터가 자동으로 삭제되어 메모리를 절약하고 오래된 데이터의 갱신을 유도한다.
+
+```jsx
+SETEX user:1001 60 "John Doe" // 60초 후 자동 삭제
+
+EXPIRE user:1001 30 // 기존 키의 TTL을 30초로 변경
+
+TTL user:1001 // 남은 TTL 확인
+```
+
+# LRU(Least Recently Used) 알고리즘
+
+메모리 공간이 부족할 때 `가장 오래 사용하지 않은 데이터`를 우선적으로 삭제하는 방식이다
+
+왜 사용하는가?
+
+1. 메모리 사용량을 최적화하고, 성능 유지
+2. 자주 사용하는 데이터는 유지하고, 덜 사용하는 데이터 삭제
+3. 제한된 리소스 내에서 캐싱 효율 극대화
+
+## LRU 정책 종류
+
+1. volatile-lru : TTL이 설정된 키들 중 LRU 방식으로 제거
+2. allkeys-lru : 모든 키를 대상으로 LRU 방식으로 제거
+3. volatile-ttl : TTL이 짧은 데이터부터 삭제
+4. volatile-random : TTL이 있는 키 중 랜덤 삭제
+5. allkeys-random : 모든 키 중 랜덤 삭제
+
+## LRU 설정 방법
+
+```jsx
+CONFIG SET maxmemory 100mb
+CONFIG SET maxmemory-policy allkeys-lru
+```
+
+# TTL + LRU 활용 예
+
+```jsx
+const redis = require('redis');
+const redisClient = redis.createClient();
+redisClient.connect();
+
+// 사용자 검색 기록 추가 (최대 10개 저장)
+async function addSearchHistory(userId, keyword) {
+  const key = `search_history:${userId}`;
+
+  // 최근 검색어를 왼쪽에 추가
+  await redisClient.lPush(key, keyword); // 새로운 검색어를 앞쪽에 추가한다.
+  
+  // 10개 이상 저장되지 않도록 제한
+  await redisClient.lTrim(key, 0, 9);// 10개까지만 저장이 되도록 제한
+
+  // TTL 설정 (24시간 후 자동 삭제)
+  await redisClient.expire(key, 86400); // 24시간 후 자동 삭제 ( TTL적용)
+}
+
+// 사용자 검색 기록 가져오기
+async function getSearchHistory(userId) {
+  const key = `search_history:${userId}`;
+  return await redisClient.lRange(key, 0, -1);
+}
+
+// 테스트 실행
+addSearchHistory(1001, "Redis LRU 알고리즘");
+addSearchHistory(1001, "TTL 활용하기");
+setTimeout(async () => {
+  console.log(await getSearchHistory(1001)); // 최근 2개 검색어 조회
+}, 1000);
+
+```
 
 # 출처
 
