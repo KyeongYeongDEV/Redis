@@ -3,7 +3,7 @@
 1. 기본 구조(Key-Value) 및 Get, Set 사용법 [o]
 2. Redis를 사용하는 API 구축 [o]
 3. Keysapce와 Redis의 메모리 관리 방식 [o]
-4. 데이터 영속화(AOF, RDB) [ㅅ]
+4. 데이터 영속화(AOF, RDB) [o]
 5. Indexing과 Caching 활용 [] 
     - Redis를 캐싱 계층으로 사용해 데이터베이스의 성능 향상
 6. TTL와 LRU 알고리즘 이해 []
@@ -76,7 +76,7 @@
     docker ps // 실행중인 프로세스 중에 redis가 있는지 확인
     ```
     
-    ![image.png](./assets//dockerComposeUpRedis.png)
+    ![image.png](./assets/dockerComposeUpRedis.png)
     
 5. redis-cli를 통한 연결 가능
     
@@ -302,11 +302,77 @@ stop-writes-on-bgsave-error yes
 
 이 파라미터는 `SAVE 이벤트에만 해당`한다. BGSAVE 명령을 직접 입력했을 때는 해당 x
 
+### RDB 관련 Info 조회
+
+```jsx
+info persistence
+
+//출력
+loading:0
+async_loading:0
+current_cow_peak:0
+current_cow_size:0
+current_cow_size_age:0
+current_fork_perc:0.00
+current_save_keys_processed:0
+current_save_keys_total:0
+rdb_changes_since_last_save:0
+rdb_bgsave_in_progress:0
+rdb_last_save_time:1737955327
+rdb_last_bgsave_status:ok
+rdb_last_bgsave_time_sec:-1
+rdb_current_bgsave_time_sec:-1
+rdb_saves:0
+rdb_last_cow_size:0
+rdb_last_load_keys_expired:0
+rdb_last_load_keys_loaded:0
+aof_enabled:1
+aof_rewrite_in_progress:0
+aof_rewrite_scheduled:0
+aof_last_rewrite_time_sec:-1
+aof_current_rewrite_time_sec:-1
+aof_last_bgrewrite_status:ok
+aof_rewrites:0
+aof_rewrites_consecutive_failures:0
+aof_last_write_status:ok
+aof_last_cow_size:0
+module_fork_in_progress:0
+module_fork_last_cow_size:0
+aof_current_size:88
+aof_base_size:88
+aof_pending_rewrite:0
+aof_buffer_length:0
+aof_pending_bio_fsync:0
+aof_delayed_fsync:0
+```
+
+### 수동 SAVE 하기
+
+redis.conf 파일에 설정해서 주기적으로 돌아가게 만들 수 있지만, 직접 터미널에서 명령으로 RDB파일을 수동을 만들 수 있다.
+
+```jsx
+> BGSAVE
+
+//출력
+127.0.0.1:6379> BGSAVE
+Background saving started
+```
+
 ## AOF (Append Only File)
 
-Write 작업이 일어날 때마다 File에 로그처럼 해당 명령이 기록 된다.
+Write /Update 작업이 일어날 때마다 File에 로그처럼 해당 명령이 기록 된다.
+Redis가 살아났을 때 기록된 작업을 다시 재생해서 복구한다.
 
-Redis가 살아났을 때 기록된 write작업을 다시 재생해서 복구한다.
+다음 순서로 데이터가 저장된다.
+
+1. Client의 업데이트 관련 명령 요청
+2. Redis는 해당 명령을 AOF에 저장
+3. 파일쓰기가 완료 후 Redis메모리 내용 변경
+
+연산이 발생할 때마다 매번 기록
+
+RDB 방식과는 달리 특정 시점이 아니라 항상 현재까지의 로그를 기록할 수 있으며,
+기본적으로 non-blacking으로 동작된다.
 
 ### 장점
 
@@ -314,15 +380,23 @@ Redis가 살아났을 때 기록된 write작업을 다시 재생해서 복구한
 
 FLUSH ALL 명령어를 실수로 사용한 경우 AOF 파일에 기록된 FLUSH ALL만 제거하고, 서버를 재시작하면, 가장 최신의 데이터 상태로 복구가 가능한다.
 
+RDB는 바이너리 파일이라서 수정이 불가능했지만, AOF 로그 파일은 text 파일이므로 편집 가능
+
 ### 단점
 
-동일한 시점의 데이터라도 RDB보다 AOF가 더 크다
+동일한 시점의 데이터라도 모든 연산을 로그로 다 남기기 때문에 RDB보다 AOF가 더 크다
 
-RDB보다 AOF가 더 느리다
+재시작시 모든 저장 된 연산을 다시 실행해서 해서 RDB보다 AOF가 더 느리다
+
+### Redis 데이터 복구 시나리오
+
+만약 실수로 flushall 명령으로 메모리에 있는 모든 데이터를 날렸을 때,  Redis서버를 shutdown하고 appendonly.aof 파일에서 flushall 명령을 제거한 수 Redis를 다시 시작하면 데이터 손실 없이 데이터를 살릴 수 있다
 
 ### AOF Rewrite
 
 Rewrite는 현재 AOF에 기록된 write 작업을 통해 가장 최근의 데이터로 복구하기 위해 필요한 최소한의 작업이 기록된 새로운 파일은 만드는 것을 뜻함
+
+즉, 이전 기록은 모두 사라지고 최종 데이터에 대한 기록만 있다
 
 백그라운드에서 rewrite 작업이 일어나게 된다
 
@@ -350,17 +424,177 @@ OS에게 fsync를 맡긴다.
 
 Linux는 보통 30초마다 fsync를 한다.
 
-## 어떤 것을 골라야 하는가
+### AOF 사용법
 
-### RDS
+| 설정 항목 | 설정 사례 | 설명 |
+| --- | --- | --- |
+| appendonly | yes | AOF 파일 사용 여부 |
+| appendfilename | “appendonly.aof | AOF 파일 이름 지정 |
+| appendfsync | always | 운영체제의 fsync()에 의해 지연된 쓰기 옵션 (메모리 → Disk)
+- no : fsync() 사용없이 즉시 쓰기, 가장 빠름
+- always : 항상 fsync() 사용, 느리지만 안전함
+- everysec : 매 초마다 fsync() 호출 |
+| no-appendfsync-on-rewrite | no | 쓰기 명령에 대한 fsync() 리턴 지연 시간이 너무 길어지면 운영체제의 간섭이 있을 수 있으므로, 스냅샷 생성을 위한 BGSAVE 또는 AOF파일 기록을 위한 BGREWIRTEAOF가 실행되고 있을 때는 fsync()의 호출을 블록킹함 |
+| auto-aof-rewrite-percentage | 100 | AOF 파일 초기화 및 재기록 시작을 위해 최로 AOF 파일의 크기를 기준으로 사용 비율을 지정(’0’으로 지정시 AOF 파일 초기화 없음) |
+| auto-aof-rewirte-min-size | 64mb | AOF 파일 초기화 및 재기록 시작을 위해 파일 크기를 지정(’0’으로 지정시 AOF 파일 초기화 없음) |
 
-재해 발생시 몇 분 정도의 데이터 손실을 감수할 수 있다면 RDS만 단독으로 사용가능
+### redis.conf 설정 방식
 
-### AOF
+레디스 서버가 시작할 때 어떤 데이터 파일을 읽을지는 redis.conf 설정 파일의 appendonlyfile 설정을 따른다.
 
-데이터 손실을 최소화 해야 하는 경우 사용한다.
+```jsx
+appendonly yes
+```
 
-AOF만 사용하는 경우, 명령어를 모두 다시 실행해야 하기 때문에, 데이터를 복구하는 시간이 오래 걸릴 수 있다. 따라서 RDS를 같이 사용하는 것이 좋다.
+- `appendonly yes` : `aof` 파일을 읽음
+- `appendonly no` : `rdb` 파일을 읽음
+
+### AOF 파일명 지정
+
+Append only file 명을 지정하는 파라미터이다.
+
+이 파라미터는 appendonly가 yes일 때 적용된다.
+
+config set 명령으로 변경할 수 없다.
+
+```jsx
+appendfilename "appendonly.aof"
+```
+
+### AOF에 기록되는 시점 지정
+
+appendfsync는 appendonly 파일에 `데이터가 쓰여지는 시점`을 정하는 파라미터
+
+AOF는 파일 에 저장할 때 파일을 버퍼 캐시에 저장하고 적절한 시점에 이 데이터를 디스크로 저장하는데 appendfsync 는 디스크와 동기화를 얼마나 자주 할 것인지에 대해 설정하는 값으로 3가지 옵션이 있다
+
+- always : 명령 실행시마다 AOF에 기록, 데이터 유실은 거의 없지만 성능이 매우 떨어진다.
+- everysec : 1초마다 AOF에 기록 (이 옵션을 권장함)
+- no : AOF에 기록하는 시점을 OS가 정함 (일반적인 리눅스의 디스크 기록 간격 30초)
+       데이터 유실 가능성 있음
+
+### AOF Rewrite 설정
+
+처음 Redis 서버가 시작할 시점의 AOF 파일 사이즈가 100%이상 커지면 rewrite하게 되어있다. 
+
+만약 레디스 서버 시작시 AOF 파일 사이즈가 0이었다면, auto-aof-rewrite-min-size를 기준으로 rewrite한다.
+
+하지만 min-size가 64mb 이하이면 rewrite를 하지 않는데, 이는 파일이 작을 때 rewrite가 자주 발생하는 것을 방지하기 위함이다.
+
+```jsx
+// AOF 파일 사이즈가 특정 퍼센트 이상 커디면 rewrite한다.
+// 비교 기준은 레디스 서버가 시작할 시점의 AOF 파일 사이즈이다.
+// 0으로 설정하면 rewrite를 하지 않는다.
+auto-aof-rewrite-percentage 100
+
+// AOF 파일 사이즈가 64mb 이하면 rewrite를 하지 않는다.
+// 파일이 작을 때 rewrite가 자주 발생하는 것을 막아준다.
+auto-aof-rewrite-min-size 64mb
+```
+
+### AOF 파일을 이용한 복구하기
+
+```jsx
+set a 11
+set b 22
+set c 33
+
+> keys *
+1) "b"
+2) "a"
+3) "c"
+
+> flushall
+OK
+
+>keys *
+(empty list or set)
+
+// appendonly.aof 파일에 로드가 쌓인다
+// AOF는 명령 실행 순서대로 텍스트로 쓰여지며 편집 가능
+// '*' 는 명령 시작을 나타낸다. 숫자는 명령과는 인수의 개수이다
+// '$' 는 명령이나 인수, 데이터의 바이트 수이다. (한글은 UTF-8로 했을 경우 한 글자에 3byte)
+*2
+$6
+SELECT
+$1
+0
+*3
+$3
+set
+$1
+a
+$2
+11
+*3
+$3
+set
+$1
+b
+$2
+22
+*3
+$3
+set
+$1
+c
+$2
+33
+*1
+$8
+flushall
+
+// 젤 마지막의 flushall 명령어를 지워주고 저장해준다.
+// 다시 Redis를 실행해주면 데이터가 복구되어 있다.
+```
+
+# 선택 기준
+
+## RDB 사용 주의할 점
+
+Redis에 장애가 발생했을 때 백업 시점을 제외한 중간 시점에서 발생한 데이터는 유실될 수 있다.
+
+rdb 파일을 생성하는 cli 명령어 save는 single thread로 수행하기 때문에 작업이 완료되기까지 모든 요청이 대기하게 된다.
+
+따라서 bgsave 커맨드로 background 자식 프로세스를 통해 RDB작업 수행하도록 할 것을 권장되는 편이다
+
+그러나 bg커맨드 수행시엔 `memory 사용률`을 조심해야 한다.
+
+redis 서비스에서 사용중인 데이터는 모두 메모리 위에 잇는데 이를 서비스 영향 없이 스냅샷으로 저장하기 위해서는 Copy-on-Wrtie(COW) 방식을 사용한다.
+자식 프로세스 fork() 후 부모 프로세스의 메모리에서 실제로 변경이 발생한 부분만 복사하게 되는데 만일 write 작업이 많아서 부모 페이지 전부에 변경이 발생하게 되면 부모 페이지 전부를 복사하게 되는 현상이 발생하게 된다.
+
+## AOF 사용 주의할 점
+
+단순하게 봤을 때 쓰기 작업의 기록을 저장해 불러오는 형식으로 복구를 하기 때문에 안정적이며 이상적으로 보일 수 있다 하지만 그렇지 않다
+
+예를 들어 100번의 increment 작업을 통해 0의 데이터를 100으로 만들었다고 했을 때 
+최종적으로 저장되어 있는 데이터는 100이지만 불필요하게 100번의 작업을 수행해야 한다. 
+뿐만 아니라 RDB 방식에 비해 백업 데이터가 크기도 하고 , 서버 자원 또한 많이 잡아먹는 편이다.
+
+따라서 Redis 공식 문서에서는 RDB와 AOF 방식을 적절히 혼재해서 사용할 것을 권장한다.
+
+## RDB VS AOF
+
+Redis를 단순히 캐시 기능으로만 사용을 한다면 굳이 백업을 할 필요가 없다. 저장 공간이 낭비가 되기 때문이다.
+
+백업은 필요하지만 어느 정도의 데이터 손실이 발생해도 괜찮은 경우 RDB를 단독으로 사용하는 것을 고려한다.
+redis.conf 파일에서 SAVE 옵션을 적절하게 변경해서 사용하면 된다.
+
+```jsx
+SAVE 900 1 // 900초 동안 1개 이상의 키가 변경되었을 때 RDS 파일 재작성
+
+```
+
+하지만, 장애 상황 직전까지 모든 데이터가 보장되어야 할 경우 AOF를 사용한다.
+
+```jsx
+appendfsync everysec
+```
+
+사실 RDS와 AOF의 장단점을 상쇄하기 위해 두가지 방법을 혼용해서 사용하는 것이 좋다
+
+- 주기적으로 RDB로 백업하고, snapshot까지의 저장을 AOF 방식으로 수행하는 식으로 혼용
+
+이렇게 하면 서버가 restart할 때 백업된 snapshot을 reload하고 비교적 적은 양의 AOF 로그만 replay하면 되기 때문에 restart 시간을 절약하고 데이터의 손실의 최소화 할 수 있다.
 
 # 출처
 
