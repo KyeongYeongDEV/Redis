@@ -8,10 +8,10 @@
     - Redis를 캐싱 계층으로 사용해 데이터베이스의 성능 향상
 6. TTL와 LRU 알고리즘 이해 [o]
 7. 기타 자료구조 활용 (Hsah, List, Set, Sorted Set) [o]
-8. 캐싱 정책 - 정적/동적 캐싱 차이 []
-9. Cahce Stampede 방지 - 잠금 캐싱 []
-10. Lock 구현 및 동시성 이슈 해결 []
-11. SETNX와 EXPIRE로 분산 LOCK 구현 []
+8. 캐싱 정책 - 정적/동적 캐싱 차이 [o]
+9. Cahce Stampede 방지 - 잠금 캐싱 [o]
+10. Lock 구현 및 동시성 이슈 해결 [o]
+11. SETNX와 EXPIRE로 분산 LOCK 구현 [o]
 12. Redlock 알고리즘으로 데이터 정합성 보장 []
 13. 여러 사용자가 동시에 접근할 때 생길 수 있는 데이터 충돌 해결 []
 14. Redis 트랜잭션(MULTI/EXEC) []
@@ -707,6 +707,422 @@ addSearchHistory(1001, "TTL 활용하기");
 setTimeout(async () => {
   console.log(await getSearchHistory(1001)); // 최근 2개 검색어 조회
 }, 1000);
+
+# 캐싱 정책 - 정적 VS 동적 캐싱 차이
+
+어떤 방식으로 캐싱을 적용하느냐에 따라 성능 최적화, 응답 속도, 리소스 효율성이 달라질 수 있다.
+
+## 캐싱 정책 이란?
+
+캐싱은 데이터를 저장하고 활용하는 방식에 따라 `정적 캐싱`(Static Caching)과 `동적 캐싱`(Dynamic Caching)으로 나뉜다.
+
+## 정적 캐싱(Static Caching)
+
+자주 변하지 않는 데이터를 일정 시간 동안 그대로 캐싱하는 방식
+
+데이터가 자주 갱신되지 않는 경우 유용
+
+예) HTML페이지, 이미지, CSS파일, API 응답, 상품 목록
+
+TTL로 만료된 시간 설정 후 자동 삭제
+
+```jsx
+SETEX home_page 3600 "<html>...</html>
+```
+
+- API응답을 Redis에 저장 후 일정 시간 동안 사용
+
+```jsx
+const redis = require('redis');
+const axios = require('axios');
+
+const redisClient = redis.createClient();
+redisClient.connect();
+
+// 외부 API에서 뉴스 데이터 가져오기
+async function fetchNewsFromAPI() {
+  const response = await axios.get('https://newsapi.org/v2/top-headlines?country=us&apiKey=YOUR_API_KEY');
+  return response.data.articles;
+}
+
+// 뉴스 데이터를 캐싱하여 반환하는 함수
+async function getNews() {
+  const cacheKey = 'top_news';
+  
+  // 1️⃣ Redis에서 캐시 확인
+  const cachedNews = await redisClient.get(cacheKey);
+  if (cachedNews) {
+    console.log("✅ 캐시에서 뉴스 데이터 반환!");
+    return JSON.parse(cachedNews);
+  }
+
+  // 2️⃣ 캐시에 없으면 API에서 가져오기
+  console.log("❌ 캐시에 없음. API에서 뉴스 가져오기...");
+  const news = await fetchNewsFromAPI();
+
+  // 3️⃣ Redis에 저장 (60초 동안 캐싱)
+  await redisClient.setEx(cacheKey, 60, JSON.stringify(news));
+
+  return news;
+}
+
+// 실행
+getNews().then(console.log);
+
+```
+
+### 장점
+
+캐시 유지비용이 적고, 빠른 응답 가능
+
+### 단점
+
+데이터 변경이 발생하면 수동으로 갱신해야 한다.
+
+## 동적 캐싱(Dynamic Caching)
+
+데이터가 자주 변경되거나, 사용자 요청에 따라 캐싱 내용이 달리지는 데이터를 캐싱하는 방식
+
+요청마다 다른 데이터가 반환될 가능성이 높음
+
+캐싱 기간이 짧거나, 요청 별로 저장 필요
+
+예 ) 로그인한 사용자의 대시보드, `실시간` 주식 가격, 사용자별 맞춤 추천 시스템
+
+```jsx
+// 💡 사용자별 데이터를 개별 캐싱
+
+async function getUserDashboard(userId) {
+  const cacheKey = `user_dashboard:${userId}`;
+
+  // 1️⃣ Redis에서 캐시 확인
+  const cachedDashboard = await redisClient.get(cacheKey);
+  if (cachedDashboard) {
+    console.log(`✅ 사용자 ${userId}의 캐시된 대시보드 반환`);
+    return JSON.parse(cachedDashboard);
+  }
+
+  // 2️⃣ 캐시에 없으면 DB에서 가져오기 
+  console.log(`❌ 사용자 ${userId}의 대시보드가 캐시에 없음. DB 조회...`);
+  const userDashboard = { userId, balance: Math.random() * 1000, notifications: 3 };
+
+  // 3️⃣ Redis에 저장 (30초 동안 캐싱)
+  await redisClient.setEx(cacheKey, 30, JSON.stringify(userDashboard));
+
+  return userDashboard;
+}
+
+// 실행
+getUserDashboard(1001).then(console.log);
+
+```
+
+### 장점
+
+실시간 데이터 반영 가능
+
+### 단점
+
+캐싱 관리가 어렵고, DB 부하가 발생할 가능성이 있음
+
+## 정적 VS 동적 캐싱 비교
+
+데이터의 변경 빈도와 TTL 설정 방식에 따라 어느 것을 사용할지가 결정된다.
+
+| 항목 | 정적 캐싱 | 동적 캐싱 |
+| --- | --- | --- |
+| 데이터 변경 빈도 | 거의 변하지 않음 | 자주 변경됨 |
+| 캐싱 기간 | 비교적 길게 설정 가능 | 짧거나 요청별 캐싱 필요 |
+| TTL 설정 | 일반적으로 설정 | 요청 별로 다를 수 있음 |
+| 사용 사례 | HTML, 이미지, API 응답 | 사용자 대시보드, 실시간 데이터 |
+| 예제 | 뉴스 시가 캐싱 | 로그인한 사용자 정보 |
+| 갱신 방법 | TTL 만료 전까지 동일한 데이터 유지 | 요청마다 새로운 데이터 저장 가능 |
+| 캐싱 키 방식 | cache_key(고정 키) | cache_key:user_id(유저별 키) |
+
+## 정적 + 동적 캐싱을 함께 사용하는 전략
+
+실제 애플리케이션에서는 정적 & 동적 캐싱을 `혼합하여 사용`하는 경우가 많다
+
+```jsx
+// 정적 캐싱 : 트렌딩 뉴스 리스트 (30분 TTL)
+// 동적 캐싱 : 로그인한 사용자의 최근 검색 기록 (30초 TTL)
+
+async function getDashboardWithNews(userId) {
+  const newsKey = 'trending_news';
+  const userKey = `user_dashboard:${userId}`;
+
+  // 1️⃣ 뉴스 데이터 캐싱 (정적 캐싱)
+  let news = await redisClient.get(newsKey);
+  if (!news) {
+    news = await fetchNewsFromAPI();
+    await redisClient.setEx(newsKey, 1800, JSON.stringify(news)); // 30분 캐싱
+  } else {
+    news = JSON.parse(news);
+  }
+
+  // 2️⃣ 사용자 대시보드 캐싱 (동적 캐싱)
+  let userDashboard = await redisClient.get(userKey);
+  if (!userDashboard) {
+    userDashboard = { userId, balance: Math.random() * 1000, notifications: 3 };
+    await redisClient.setEx(userKey, 30, JSON.stringify(userDashboard)); // 30초 캐싱
+  } else {
+    userDashboard = JSON.parse(userDashboard);
+  }
+
+  return { news, userDashboard };
+}
+
+// 실행
+getDashboardWithNews(1001).then(console.log);
+```
+
+# Locking & 동시성 이슈 해결
+
+Redis를 사용하면 분산 환경에서의 동시성 문제를 해결할 수 있다.
+특히, `SETNX`(Set if Not Exists)와 `EXPIRE`를 활용한 `분산 LOCK`을 사용하면 
+캐시 일관성 유지 및 Cache Stampede 방지가 가능하다
+
+<aside>
+💡
+
+Cache Stampede란?
+캐시가 만료되는 순간 다수의 요청이 동시에 DB로 몰려 과부화가 발생하는 문제
+
+해결 방법 
+
+1. 조기 갱신 : TTL이 끝나기 전에 미리 갱신
+2. 랜덤 TTL 적용 : 모든 캐시가 동시에 만료되지 않도록 함
+3. Locking 캐싱 : SETNX + EXPIRE 로 하나의 프로세스만 갱신 허용
+</aside>
+
+## 동시성 이슈란?
+
+여러 프로세스가 동시에 같은 데이터에 접근하면서 경쟁 조건(Race Condition)이 발생하는 문제
+
+캐시 생신, DB업데이트, 작업 큐 관리시 데이터 정합성 유지가 어려워짐
+
+예 ) 여러 요청이 동시에 DB에서 데이터를 가져와 캐시에 저장하려는 경우
+
+### 동시성 문제가 발생하는 시나리오
+
+```jsx
+// case1 : 캐시 갱신 중 Race Condition 발생
+// 여러 요청이 동시에 캐시를 갱신하려고 하면 갱쟁 조건 발생
+// Cache Stampede 문제 발생 가능
+
+const cacheKey = "user_1001";
+
+// 1️⃣ 캐시에 데이터가 있는지 확인
+let data = await redisClient.get(cacheKey);
+if (!data) {
+  // 2️⃣ 데이터가 없으면 DB에서 가져옴 (다른 요청도 동시에 수행 가능)
+  data = await fetchUserFromDB(1001);
+  
+  // 3️⃣ 여러 프로세스가 동시에 같은 데이터를 Redis에 저장 (경쟁 발생)
+  await redisClient.setEx(cacheKey, 60, JSON.stringify(data));
+}
+
+return JSON.parse(data);
+
+```
+
+## Redis Lock을 이용한 동시성 문제 해결 (SETNX + EXPIRE)
+
+해결방법 : 분산 Lock 적용
+
+`SETNX`와 `EXPIRE`를 조합하면 하나의 프로세스만 캐시를 갱신하도록 제어할 수 있다.
+
+1. SETNX key value → Key가 없을 경우에만 저장 (Lock 설정)
+2. EXPIRE key TTL → Lock이 영구적으로 유지되지 않도록 만료 시간 설정
+
+```jsx
+async function getCachedDataWithLock(key, fetchFromDB) {
+  const cachedData = await redisClient.get(key);
+  if (cachedData) return JSON.parse(cachedData);
+
+  const lockKey = `${key}:lock`;
+  
+  // 1️⃣ Lock 획득 (SETNX) -> 만약 Lock이 존재하면 다른 프로세스 대기
+	// NX : true -> Lock이 존재하지 않을 경우에만 설정
+	// EX : 10 -> 만약 Lock을 획득한 후 프로세스가 실패해도 10초 후 자동 해제	 
+  const lockAcquired = await redisClient.set(lockKey, "locked", { NX: true, EX: 10 });
+
+  if (!lockAcquired) {
+    console.log("🔒 다른 프로세스가 캐시 갱신 중... 대기");
+    await new Promise((resolve) => setTimeout(resolve, 100)); // 100ms 대기 후 재시도
+    return getCachedDataWithLock(key, fetchFromDB);
+  }
+
+  try {
+    // 2️⃣ 캐시에 없으면 DB에서 가져와 저장
+    const newData = await fetchFromDB();
+    await redisClient.setEx(key, 60, JSON.stringify(newData));
+
+    return newData;
+  } finally {
+    // 3️⃣ Lock 해제 : 작업 완료 후 LOCK을 삭제하여 다른 프로세스가 캐싱 가능하도록 함
+    await redisClient.del(lockKey);
+  }
+}
+
+// 실행
+getCachedDataWithLock("user_1001", () => fetchUserFromDB(1001)).then(console.log);
+
+```
+
+## Locking구현시 고려해야 할 사항
+
+### Deadlock(교착상태) 방지
+
+만약 Lock을 획득한 프로세스가 실패하면, Lock이 영구적으로 유지될 가능성이 있다
+
+해결방법 → TTL을 반드시 설정(EXPIRE)
+
+```jsx
+// Lock이 해제될 때까지 일정 시간 대기 후 재시도
+await redisClient.set(lockKey, "locked", { NX: true, EX: 10 });
+```
+
+### 캐시 갱신 중인 경우, 대기 후 재시도
+
+다른 프로세스가 Lock을 획득하고 캐시를 갱신 중이면 대기 후 재시도
+
+```jsx
+// Lock이 해제될 때까지 일정 시간 대기 후 재시도 
+if (!lockAcquired) {
+  console.log("🔒 다른 프로세스가 캐시 갱신 중... 대기");
+  await new Promise((resolve) => setTimeout(resolve, 100)); // 100ms 대기
+  return getCachedDataWithLock(key, fetchFromDB);
+}
+
+```
+
+## 분산 환경에서의 Redis Lock
+
+### Race Condition(경쟁조건)이란
+
+두 개 이상의 프로세스(또는 스레드)가 동시에 같은 자원(데이터, 변수 등)에 접근하면서 예상치 못한 동작이 발생하는 문제
+
+### 어떻게 발생할까?
+
+1. 여러 요청이 동시에 같은 데이터를 읽고 수정
+2. 요청 간 실행 순서가 보장되지 않음
+3. 최종 결과가 예상과 다르게 변형됨 (데이터 불일치 발생)
+
+### Race Condition 예제: 은행 계좌 잔액 처리
+
+```jsx
+async function withdraw(userId, amount) {
+  const balanceKey = `balance:${userId}`;
+
+  // 1️⃣ 현재 잔액 조회
+  let balance = await redisClient.get(balanceKey);
+  if (!balance) balance = 1000; // 초기값
+
+  if (balance < amount) {
+    console.log("❌ 잔액 부족!");
+    return false;
+  }
+
+  // 2️⃣ 출금 처리 (동시에 여러 요청이 접근 가능!)
+  await redisClient.set(balanceKey, balance - amount);
+  console.log(`✅ ${amount}원 출금 완료! 남은 잔액: ${balance - amount}`);
+
+  return true;
+}
+```
+
+- 문제점 : 만약 두 개의 출금 요청이 동시에 실행 되면?
+    - 두 요청이 같은 잔액을 가져옴
+    - 첫 번째 요청 : 1000 - 500 = 500
+    - 두 번째 요청 : 1000 - 500 = 500 ⇒ 잔액 오류 발생!( 정상적으로는 0원이 되어야 함)
+
+### 해결방법
+
+- Locking 기법을 사용한다 (SETNX + EXPIRE)
+    - 하나의 요청만 출금이 가능하도록 동시성 제어
+    - LOCK을 통해 Race Condition 해결
+    - LOCK이 영구적으로 유지되지 않도록 EXPIRE 설정 (Deadlock 방지)
+
+```jsx
+async function withdrawWithLock(userId, amount) {
+  const balanceKey = `balance:${userId}`;
+  const lockKey = `lock:${userId}`;
+
+  // 1️⃣ Lock 설정 (동시에 하나의 요청만 처리)
+  const lock = await redisClient.set(lockKey, "locked", { NX: true, EX: 5 });
+  if (!lock) {
+    console.log("🔒 다른 프로세스가 출금 처리 중... 대기");
+    await new Promise((resolve) => setTimeout(resolve, 100)); // 100ms 대기 후 재시도
+    return withdrawWithLock(userId, amount);
+  }
+
+  try {
+    // 2️⃣ 현재 잔액 조회
+    let balance = await redisClient.get(balanceKey);
+    if (!balance) balance = 1000;
+
+    if (balance < amount) {
+      console.log("❌ 잔액 부족!");
+      return false;
+    }
+
+    // 3️⃣ 출금 처리
+    await redisClient.set(balanceKey, balance - amount);
+    console.log(`✅ ${amount}원 출금 완료! 남은 잔액: ${balance - amount}`);
+
+    return true;
+  } finally {
+    // 4️⃣ Lock 해제
+    await redisClient.del(lockKey);
+  }
+}
+
+```
+
+### 분산 환경 Redis Lock 예제
+
+사용 예시 : 상품 재고 감소 처리 
+
+```jsx
+// Race Condition 방지 -> Lock을 사용해 한 번에 하나의 요청만 실행 가능
+// 재고 차감 중 다른 프로세스가 동시에 변경하는 문제 해결
+async function decreaseStock(productId, quantity) {
+  const lockKey = `stock_lock:${productId}`;
+  const stockKey = `stock:${productId}`;
+
+  // 1️⃣ Lock 설정
+  const lockAcquired = await redisClient.set(lockKey, "locked", { NX: true, EX: 5 });
+
+  if (!lockAcquired) {
+    console.log("🔒 다른 프로세스가 재고 처리 중... 대기");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    return decreaseStock(productId, quantity);
+  }
+
+  try {
+    // 2️⃣ 현재 재고 확인
+    let stock = await redisClient.get(stockKey);
+    stock = stock ? parseInt(stock) : 0;
+
+    if (stock < quantity) {
+      console.log("❌ 재고 부족!");
+      return false;
+    }
+
+    // 3️⃣ 재고 차감
+    await redisClient.set(stockKey, stock - quantity);
+    console.log(`✅ ${quantity}개 상품 구매 완료! 남은 재고: ${stock - quantity}`);
+
+    return true;
+  } finally {
+    // 4️⃣ Lock 해제
+    await redisClient.del(lockKey);
+  }
+}
+
+// 실행
+decreaseStock("product_123", 2);
 
 ```
 
