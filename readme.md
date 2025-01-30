@@ -1126,6 +1126,126 @@ decreaseStock("product_123", 2);
 
 ```
 
+# RedLock알골 - 분산 Lock으로 데이터 정합성 보장
+
+Redlock 알골은 Redis를 이용한 분산 환경에서의 동시성 제어 및 데이터 정합성을 보장하는 락(lock) 알고리즘이다
+
+## 왜 필요할까?
+
+- 멀티 서버 환경에서 `SETNX`를 사용한 단일 redis락은 신뢰성이 떨어진다.
+- 단일 Redis 노드가 장애가 발생하면 **Lock이 사라지거나 유지될 수 있다** (데이터 정합성 문제)
+- Redlock은 여러 개의 Redis 노드를 사용하여 분산 환경에서도 **안정한 락을 제공**
+
+## RedLock 알고리즘 개념
+
+N개의 Redis 노드 중 과반수(majority, N/2+1) 이상에서 Lock을 획득하면 유효한 락으로 간주한다.
+
+즉, 서버 5개중 3개 이상에서 락을 얻으면 성공!
+
+### 주요원칙
+
+1. N개의 독립적인 Redis 인스턴스(일반적으로 5개)를 운영
+2. 각 인스턴스에 동일한 Key로 Lock 요청 (SET NX EX)
+3. 과반수 이상의 노드에서 Lock을 얻으면 성공 (N/2+1개 이상)
+4. Lock이 만료되거나 해체되면 다른 요청이 Lock을 획득 가능
+5. 네트워크 지연/서버 장애가 있어도 데이터 정합성을 보장
+
+## RedLock 획득 및 해제 과정
+
+### 락 획득 과정 (Lock Acquisition)
+
+1. 각 Redis 노드에 SETNX 명령어로 Lock 요청 (NX : 존재하지 않을 때만 저장)
+2. EX 옵션을 사용하여 Lock 만료 시간을 설정하여 Deadlock 방지
+3. Lock 요청은 짧은 타임아웃(예: 10ms) 내에 완료되어야 함
+4. 과반수 이상의 Redis 노드에서 Lock을 획득하면 성공
+5. 전체 과정에서 걸린 시간을 계산하여 TTL을 조정 (지연시간 보정)
+
+### 락 해제 과정 (Lock Release)
+
+1. 락을 보유한 클라이언트가 직접 Lock 해제 요청
+2. 각 Redis 노드에서 자신이 설정한 Lock인지 확인 후 삭제 (다른 요청이 해제하지 못하게 방어)
+3. 과반수 이상의 노드에서 Lock이 해제되면 새로운 요청이 Lock 획득 가능
+
+### 예제
+
+- ioredis와 redlock 패키지를 사용하여 락을 구현
+- 3개의 Redis 인스턴스를 사용하여 락 획득
+- 과반수 이상에서 Lock을 얻어야 성공
+- 락이 걸려있는 동안 데이터 정합성을 보장하면서 처리
+- Lock 해제 후 다른 요청이 처리 가능
+
+```jsx
+const Redis = require("ioredis");
+const Redlock = require("redlock");
+
+// 3개의 Redis 노드를 운영한다고 가정
+const redisClients = [
+  new Redis({ host: "127.0.0.1", port: 6379 }),
+  new Redis({ host: "127.0.0.1", port: 6380 }),
+  new Redis({ host: "127.0.0.1", port: 6381 }),
+];
+
+// Redlock 인스턴스 생성
+const redlock = new Redlock(redisClients, {
+  driftFactor: 0.01, // 네트워크 지연 시간 보정
+  retryCount: 3, // 락 획득 실패 시 재시도 횟수
+  retryDelay: 200, // 재시도 간격 (200ms)
+  retryJitter: 100, // 재시도 시간 랜덤 지연
+});
+
+async function processCriticalSection() {
+  const lockKey = "lock:critical_section";
+  const ttl = 5000; // 5초 동안 락 유지
+
+  try {
+    // 1. 락 획득 (과반수 이상의 Redis 노드에서 Lock을 얻어야 성공)
+    const lock = await redlock.lock(lockKey, ttl);
+    console.log("✅ 락 획득 성공! 데이터 처리 시작...");
+
+    // 2. 락을 보유한 동안 안전하게 데이터 처리 (예제: 은행 계좌 이체)
+    await new Promise((resolve) => setTimeout(resolve, 2000)); // 2초 대기 (작업 수행)
+
+    // 3. 락 해제 (데이터 처리 완료 후)
+    await lock.unlock();
+    console.log("락 해제 완료! 다른 요청이 처리 가능");
+  } catch (error) {
+    console.log("❌ 락 획득 실패! 다른 프로세스가 락을 보유 중...");
+  }
+}
+
+// 🔥 실행
+processCriticalSection();
+
+```
+
+## Redlock이 필요한 상황
+
+1. 재고 감소
+    - 다중 서버 환경에서 상품 재고를 조정하는 경우
+    - 같은 상품에 대한 구매 요청이 동시에 들어오는 경우 Race Condition 발생 가능
+    - Redlock을 사용하여 하나의 요청만 처리되도록 보장
+2. 예약 시스템
+    - 호텔/비행기 에약에서 동시에 같은 좌석이 예약되는 것을 방지
+    - 과반수의 redis 노드에서 락을 획득한 사용자만 예약 확정
+3. 금융 트랜잭션 
+    - 계좌 이체시 동시에 같은 계좌에서 출금이 발생하지 않도록 보호
+    - 하나의 프로세스만 출금 요청을 수행하고, 다른 요청은 대기하도록 설정
+
+## 장점 및 고려 사항
+
+### 장점
+
+- 분산 환경에서도 동시성 제어 가능
+- Redis 노드 일부 장애 발생시에도 정상동작
+- TTL을 활요해 DeadLock 방지
+- 경쟁조건 (Race Condition) 문제 해결
+
+### 고려사항
+
+- Redis 노드 수가 많아질수록 네트워크 오버헤드 증가
+- 락 획득 시간이 길어질 경우 응답 속도 저하 가능
+- Redis 클러스터 운영이 필요 (단일 Redis보다 복잡
+
 # 출처
 
 [Redis - 영속화(Persistence)](https://galid1.tistory.com/799)
