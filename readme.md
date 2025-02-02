@@ -12,7 +12,7 @@
 9. Cahce Stampede 방지 - 잠금 캐싱 [o]
 10. Lock 구현 및 동시성 이슈 해결 [o]
 11. SETNX와 EXPIRE로 분산 LOCK 구현 [o]
-12. Redlock 알고리즘으로 데이터 정합성 보장 []
+12. Redlock 알고리즘으로 데이터 정합성 보장 [o]
 13. 여러 사용자가 동시에 접근할 때 생길 수 있는 데이터 충돌 해결 []
 14. Redis 트랜잭션(MULTI/EXEC) []
 15. Lua 스크립트를 활용한 Lock 구현 []
@@ -1245,6 +1245,208 @@ processCriticalSection();
 - Redis 노드 수가 많아질수록 네트워크 오버헤드 증가
 - 락 획득 시간이 길어질 경우 응답 속도 저하 가능
 - Redis 클러스터 운영이 필요 (단일 Redis보다 복잡
+
+# 여러 사용자의 동시 접근으로 인한 데이터 충돌 해결
+
+Redis는 싱글 스레드 기반이지만, 여러 클라이언트가 동시에 접근하면 Race condition(경쟁 상태)이 발생할 수 있다
+
+## 문제 정의 - 데이터 충돌 (Race Condition)
+
+여러 사용자가 동시에 같은 데이터를 변경하려고 하면 데이터 정합성이 깨지는 문제가 발생할 수 있다
+
+예)
+
+한 쇼핑몰에서 상품 재고 1개 남아 있다
+두 명의 사용자가 동시에 상품을 구매하려고 요청을 보냈다.
+stock이 0이 되고 한 명은 구매 불가가 되어야 하지만 둘 다 구매가 성공하여 stock이 음수가 됨
+
+## 해결 방법
+
+Redis에서 동시성 문제를 해결하는 대표 4가지
+
+| 기법 | 설명 | 난이도 | 속도 | 추천 사용사례 |
+| --- | --- | --- | --- | --- |
+| WATCH & MULTI/EXEC | 낙관적 락 (Optimistic Locking) | 중 | 빠름 | 단일 Redis 인스턴스, 충돌이 적은 경우 |
+| SETNX (Mutex Lock) | 분산 락 | 쉬움 | 보통 | 동시성 제어가 필요한 단일 Redis 환경 |
+| RedLock | 고가용성 분산 락 | 어려움 | 느림 | 다중 Redis 노드 운영시 |
+| LUA Script | 원자적 연산 수행 | 중  | 매우 빠름 | 속도가 중요한 경우 |
+
+## 해결 예제 코드
+
+### Watch + MULTI/EXEC (낙관적 락)
+
+WATCH를 사용하여 데이터가 변경되지 않았을 때만 트랜잭션을 실행
+
+구현 방법 
+
+1. WATCH를 사용하 stock 값을 감시
+2. MULTI 로 트랜잭션을 시작
+3. stock 감소 연산 후 EXEC 실행
+4. stock 값이 변경되었으면 트랜잭션이 실패하고 다시 시도 → Race Condition 방지
+
+```jsx
+const Redis = require('ioredis');
+const redis = new Redis();
+
+async function purchaseItem(userId) {
+	const key = 'stock';
+	
+	while(1) {
+		// 현재 stock 값 감시   
+		// watch : 특정 키를 감식하고 있다가 그 키가 변경되면 트랙젝션이 실패하도록 함
+		// 만약 다른 프로세스가 값을 변경했는지 감시하고, 값이 변경이 되면 다시 시도하도록 구현함
+		await redis.watch(key) 
+		
+		let stock = await redis.get(key);
+		if (stock === null || stock <= 0) {
+			console.log("재고 부족");
+			return false;
+		}
+		
+		// multi : 트랜잭션 시작
+		// exec : 트랜잭션 실생
+		// discard : 트랜잭션 취소
+		
+		const multi = redis.multi();
+		// decr : key의 값을 1감소
+		multi.decr(key) ; // stock 감소
+		const result = await multi.exec(); // 트랜잭션 실행
+		
+		if (result) {
+			console.log(`${userId} 구매 성공! 남은 재고 : ${await redis.get(key)`};
+			return true;
+		} else {
+			console.log(`${userId} 출동 발생, 재시도중 ...`);
+		}
+	}
+}
+
+redis.set('stock',1); // 초기 재고값 설정
+
+purchaseItem('userA');
+purchaseItem("userB");
+		
+```
+
+### SETNX (Mutex Lock) - 분산 락
+
+SETNX를 사용하여 한 번에 하나의 요청만 접근 가능하도록 설정
+락을 획득한 클라이언트만 stock을 감소시킴, 이루 락 해제
+
+구현 방법
+
+1. SETNX 를 사용해 락을 설정
+2. stock값을 감소
+3. 락을 해제(DEL)
+
+```jsx
+async function purchaseWithLock(userId) {
+    const lockKey = "lock:stock";
+    const stockKey = "stock";
+
+    // 락 설정 (5초 후 자동 해제) // 락이 존재하지 않을 때만 생성 가능함
+    const lock = await redis.set(lockKey, "locked", "NX", "EX", 5);
+    
+    if (!lock) {
+        console.log(`${userId} 다른 사용자가 처리 중, 재시도...`);
+        setTimeout(() => purchaseWithLock(userId), 100);
+        return;
+    }
+
+    let stock = await redis.get(stockKey);
+    if (stock > 0) {
+        await redis.decr(stockKey); 
+        console.log(`${userId} 구매 성공! 남은 재고: ${await redis.get(stockKey)}`);
+    } else {
+        console.log(`${userId} 재고 부족!`);
+    }
+
+    // 락 해제
+    await redis.del(lockKey);
+}
+
+// 초기 stock 값 설정
+redis.set("stock", 1);
+
+// 사용자 두 명이 동시에 구매 시도
+purchaseWithLock("UserA");
+purchaseWithLock("UserB");
+
+```
+
+### RedLock - 고가용성 분삭 락
+
+멀티 Redis 노드에서 동기적으로 락을 관리하여 더 안정적인 락 시스템 구현
+분산환경에서 데이터 정합성을 보장할 때 사용
+
+```jsx
+//redlock 라이브러리 필요
+const Redlock = require("redlock");
+const redlock = new Redlock([redis], { retryCount: 10 });
+
+async function purchaseWithRedlock(userId) {
+    const resource = "locks:stock";
+    const ttl = 5000; // 5초 락
+
+    try {
+        const lock = await redlock.lock(resource, ttl);
+        let stock = await redis.get("stock");
+        if (stock > 0) {
+            await redis.decr("stock");
+            console.log(`${userId} 구매 성공! 남은 재고: ${await redis.get("stock")}`);
+        } else {
+            console.log(`${userId} 재고 부족!`);
+        }
+
+        await lock.unlock();
+    } catch (error) {
+        console.log(`${userId} 락 획득 실패, 재시도...`);
+    }
+}
+
+// 사용자 두 명이 동시에 구매 시도
+purchaseWithRedlock("UserA");
+purchaseWithRedlock("UserB");
+
+```
+
+### LUA 스크립트 (원자적 연산)
+
+Redis는 기본적으로 멀티 명령어 실행 중 추돌 가능성이 있지만, Lua 스크립트를 사용하면 원자적으로 실행할 수 있다.
+
+- LUA 스크립트 예제
+
+```jsx
+local stock = redis.call('GET', KEYS[1])
+if tonumber(stock) > 0 then
+    return redis.call('DECR', KEYS[1])
+else
+    return -1
+end
+```
+
+- Node.js 에서 실행
+
+```jsx
+const script = `
+    local stock = redis.call('GET', KEYS[1])
+    if tonumber(stock) > 0 then
+        return redis.call('DECR', KEYS[1])
+    else
+        return -1
+    end
+`;
+
+async function purchaseWithLua(userId) {
+    const result = await redis.eval(script, 1, "stock");
+    console.log(`${userId} 구매 결과: ${result}`);
+}
+
+// 실행
+purchaseWithLua("UserA");
+purchaseWithLua("UserB");
+
+```
 
 # 출처
 
